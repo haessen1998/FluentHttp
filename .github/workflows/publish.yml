@@ -32,24 +32,17 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Restore
-        run: dotnet restore tests/ReadableHttp.Tests/ReadableHttp.Tests.csproj
+        run: dotnet restore ReadableHttp.sln
+
+      - name: Build
+        run: dotnet build ReadableHttp.sln --configuration Release --no-restore
 
       - name: Test
-        run: dotnet test tests/ReadableHttp.Tests/ReadableHttp.Tests.csproj --configuration Release --no-restore
-
-      - name: Build packages
-        run: |
-          dotnet build src/ReadableHttp/ReadableHttp.csproj --configuration Release --no-restore
-          dotnet build src/ReadableHttp.AspNetCore/ReadableHttp.AspNetCore.csproj --configuration Release --no-restore
-          dotnet build extensions/ReadableHttp.Auth/ReadableHttp.Auth.csproj --configuration Release --no-restore
-          dotnet build extensions/ReadableHttp.ImportExport/ReadableHttp.ImportExport.csproj --configuration Release --no-restore
+        run: dotnet test tests/ReadableHttp.Tests/ReadableHttp.Tests.csproj --configuration Release --no-build
 
       - name: Pack
-        run: |
-          dotnet pack src/ReadableHttp/ReadableHttp.csproj --configuration Release --no-build --output publish/nugets
-          dotnet pack src/ReadableHttp.AspNetCore/ReadableHttp.AspNetCore.csproj --configuration Release --no-build --output publish/nugets
-          dotnet pack extensions/ReadableHttp.Auth/ReadableHttp.Auth.csproj --configuration Release --no-build --output publish/nugets
-          dotnet pack extensions/ReadableHttp.ImportExport/ReadableHttp.ImportExport.csproj --configuration Release --no-build --output publish/nugets
+        shell: pwsh
+        run: ./scripts/pack.ps1
 
       - name: Upload packages
         uses: actions/upload-artifact@v4

@@ -1,5 +1,5 @@
 using System.Text.Json;
-using ReadableHttp;
+using System.Globalization;
 using ReadableHttp.Execution;
 
 namespace ReadableHttp;
@@ -10,6 +10,9 @@ public static class ReadableHttpClient
     {
         return new ReadableHttpRequestBuilder().WithUrl(url);
     }
+
+    public static ReadableHttpRequestBuilder Request(this IReadableHttpExecutor executor, string url)
+        => Request(url).WithExecutor(executor);
 }
 
 public sealed class ReadableHttpRequestBuilder
@@ -22,9 +25,18 @@ public sealed class ReadableHttpRequestBuilder
     private readonly ReadableRequest _request = new();
     private readonly ReadableExecutionContext _context = new();
     private IReadableHttpExecutor _executor = new ReadableHttpExecutor();
+    private JsonSerializerOptions _jsonOptions = JsonOptions;
+
+    public ReadableHttpRequestBuilder WithJsonOptions(JsonSerializerOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        _jsonOptions = new JsonSerializerOptions(options);
+        return this;
+    }
 
     public ReadableHttpRequestBuilder WithExecutor(IReadableHttpExecutor executor)
     {
+        ArgumentNullException.ThrowIfNull(executor);
         _executor = executor;
         return this;
     }
@@ -43,13 +55,14 @@ public sealed class ReadableHttpRequestBuilder
 
     public ReadableHttpRequestBuilder WithUrl(string url)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(url);
         _request.Url = url;
         return this;
     }
 
     public ReadableHttpRequestBuilder WithMethod(string method)
     {
-        _request.Method = method;
+        _request.Method = new HttpMethod(method).Method;
         return this;
     }
 
@@ -63,21 +76,35 @@ public sealed class ReadableHttpRequestBuilder
 
     public ReadableHttpRequestBuilder Delete() => WithMethod("DELETE");
 
+    public ReadableHttpRequestBuilder Head() => WithMethod("HEAD");
+
+    public ReadableHttpRequestBuilder Options() => WithMethod("OPTIONS");
+
+    public ReadableHttpRequestBuilder WithPathParameter(string name, object? value)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        _request.PathParameters.Add(new ReadableNameValue { Name = name, Value = FormatValue(value) });
+        return this;
+    }
+
     public ReadableHttpRequestBuilder WithHeader(string name, object? value)
     {
-        _request.Headers.Add(new ReadableNameValue { Name = name, Value = Convert.ToString(value), Enabled = true });
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        _request.Headers.Add(new ReadableNameValue { Name = name, Value = FormatValue(value), Enabled = true });
         return this;
     }
 
     public ReadableHttpRequestBuilder WithQuery(string name, object? value)
     {
-        _request.Query.Add(new ReadableNameValue { Name = name, Value = Convert.ToString(value), Enabled = true });
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        _request.Query.Add(new ReadableNameValue { Name = name, Value = FormatValue(value), Enabled = true });
         return this;
     }
 
     public ReadableHttpRequestBuilder WithVariable(string name, object? value)
     {
-        _context.Variables[name] = Convert.ToString(value);
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        _context.Variables[name] = FormatValue(value);
         return this;
     }
 
@@ -104,7 +131,7 @@ public sealed class ReadableHttpRequestBuilder
         _request.Body = new ReadableBody
         {
             Type = ReadableBodyType.Json,
-            Content = JsonSerializer.Serialize(body, JsonOptions),
+            Content = JsonSerializer.Serialize(body, _jsonOptions),
             ContentType = "application/json"
         };
         return this;
@@ -129,7 +156,7 @@ public sealed class ReadableHttpRequestBuilder
             Form = values.Select(value => new ReadableNameValue
             {
                 Name = value.Name,
-                Value = Convert.ToString(value.Value),
+                Value = FormatValue(value.Value),
                 Enabled = true
             }).ToList()
         };
@@ -154,25 +181,32 @@ public sealed class ReadableHttpRequestBuilder
 
     public async Task<T> SendAsync<T>(CancellationToken cancellationToken = default)
     {
-        var exchange = await SendExchangeAsync(cancellationToken);
-        if (exchange.Error is not null)
-        {
-            throw new HttpRequestException(exchange.Error.Message);
-        }
-
-        var response = exchange.Response ?? throw new HttpRequestException("HTTP request did not return a response.");
-        if (response.StatusCode is < 200 or >= 300)
-        {
-            throw new HttpRequestException(
-                $"HTTP request failed with status {response.StatusCode} ({response.ReasonPhrase}). Response body: {response.BodyText}");
-        }
+        var response = await SendAsync(cancellationToken).ConfigureAwait(false);
 
         if (typeof(T) == typeof(string))
         {
             return (T)(object)(response.BodyText ?? string.Empty);
         }
 
-        return JsonSerializer.Deserialize<T>(response.BodyText ?? string.Empty, JsonOptions)
+        if (typeof(T) == typeof(byte[]))
+        {
+            return (T)(object)(response.BodyBytes ?? []);
+        }
+
+        return JsonSerializer.Deserialize<T>(response.BodyText ?? string.Empty, _jsonOptions)
             ?? throw new InvalidOperationException("Response JSON content was empty or null.");
     }
+
+    /// <summary>Sends a request and returns a successful response, including responses with no body.</summary>
+    public async Task<ReadableResponse> SendAsync(CancellationToken cancellationToken = default)
+    {
+        var exchange = await SendExchangeAsync(cancellationToken).ConfigureAwait(false);
+        if (exchange.Error is not null || exchange.Response is null || exchange.Response.StatusCode is < 200 or >= 300)
+        {
+            throw new ReadableHttpException(exchange);
+        }
+        return exchange.Response;
+    }
+
+    private static string? FormatValue(object? value) => Convert.ToString(value, CultureInfo.InvariantCulture);
 }

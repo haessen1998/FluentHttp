@@ -7,7 +7,7 @@ It supports `.http` files, curl commands, OpenAPI 3 documents, and Swagger 2 doc
 ## Install
 
 ```shell
-dotnet add package ReadableHttp.ImportExport --version 2.0.0
+dotnet add package ReadableHttp.ImportExport --version 2.1.0
 ```
 
 ## Import Curl

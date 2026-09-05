@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Description>In-memory Try document normalization for OpenAPI, .http, curl, and ReadableHttp request files.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+    <ProjectReference Include="..\..\src\ReadableHttp\ReadableHttp.csproj" />
+    <ProjectReference Include="..\ReadableHttp.ImportExport\ReadableHttp.ImportExport.csproj" />
+    <ProjectReference Include="..\ReadableHttp.Storage\ReadableHttp.Storage.csproj" />
+  </ItemGroup>
+</Project>

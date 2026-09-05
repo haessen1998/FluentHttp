@@ -7,7 +7,7 @@ The package focuses on OAuth2 helper flows, PKCE generation, localhost callback 
 ## Install
 
 ```shell
-dotnet add package ReadableHttp.Auth --version 2.0.0
+dotnet add package ReadableHttp.Auth --version 2.1.0
 ```
 
 ## PKCE

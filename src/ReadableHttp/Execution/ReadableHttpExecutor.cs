@@ -21,6 +21,14 @@ public sealed class ReadableHttpExecutor : IReadableHttpExecutor
 
     private readonly HttpMessageHandler? _handler;
     private readonly Func<HttpClient>? _httpClientFactory;
+    private readonly HttpClient? _client;
+
+    /// <summary>Uses a caller-owned client without changing or disposing it. Configure its handler to disable automatic redirects.</summary>
+    public ReadableHttpExecutor(HttpClient client)
+    {
+        ArgumentNullException.ThrowIfNull(client);
+        _client = client;
+    }
 
     public ReadableHttpExecutor()
     {
@@ -28,11 +36,13 @@ public sealed class ReadableHttpExecutor : IReadableHttpExecutor
 
     public ReadableHttpExecutor(HttpMessageHandler handler)
     {
+        ArgumentNullException.ThrowIfNull(handler);
         _handler = handler;
     }
 
     public ReadableHttpExecutor(Func<HttpClient> httpClientFactory)
     {
+        ArgumentNullException.ThrowIfNull(httpClientFactory);
         _httpClientFactory = httpClientFactory;
     }
 
@@ -51,7 +61,7 @@ public sealed class ReadableHttpExecutor : IReadableHttpExecutor
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        context ??= new ReadableExecutionContext();
+        context = context?.Snapshot() ?? new ReadableExecutionContext();
         var startedAt = DateTimeOffset.UtcNow;
         var stopwatch = Stopwatch.StartNew();
         var timings = new List<ReadableExchangeTiming>();
@@ -71,7 +81,8 @@ public sealed class ReadableHttpExecutor : IReadableHttpExecutor
             var effectiveCancellationToken = timeoutCancellation?.Token ?? cancellationToken;
 
             var clientStarted = stopwatch.Elapsed;
-            using var httpClient = CreateHttpClient(context);
+            using var lease = CreateHttpClient(context);
+            var httpClient = lease.Client;
             AddTiming(timings, "Create HttpClient", clientStarted, stopwatch.Elapsed);
 
             var sendStarted = stopwatch.Elapsed;
@@ -138,26 +149,23 @@ public sealed class ReadableHttpExecutor : IReadableHttpExecutor
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        context ??= new ReadableExecutionContext();
+        context = context?.Snapshot() ?? new ReadableExecutionContext();
         options ??= new ReadableStreamOptions();
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.BufferSize);
 
         var resolvedRequest = ReadableRequestVariableResolver.Resolve(request, context);
         ApplyRequestOptions(resolvedRequest, context);
         using var timeoutCancellation = CreateTimeoutCancellationTokenSource(context, cancellationToken);
         var effectiveCancellationToken = timeoutCancellation?.Token ?? cancellationToken;
 
-        using var httpClient = CreateHttpClient(context);
-        using var httpRequest = ReadableHttpRequestMessageFactory.Create(
-            resolvedRequest,
-            context);
+        using var lease = CreateHttpClient(context);
+        var httpClient = lease.Client;
 
         HttpResponseMessage? response = null;
         try
         {
-            response = await httpClient.SendAsync(
-                httpRequest,
-                HttpCompletionOption.ResponseHeadersRead,
-                effectiveCancellationToken);
+            var result = await SendWithRedirectsAsync(httpClient, resolvedRequest, context, effectiveCancellationToken, capturePreview: false);
+            response = result.Response;
 
             yield return new ReadableStreamMessage
             {
@@ -186,7 +194,7 @@ public sealed class ReadableHttpExecutor : IReadableHttpExecutor
             }
             else if (format == ReadableStreamFormat.JsonArray)
             {
-                await foreach (var message in ReadJsonArrayAsync(stream, effectiveCancellationToken))
+                await foreach (var message in ReadJsonArrayAsync(stream, options.Format == ReadableStreamFormat.Auto, effectiveCancellationToken))
                 {
                     yield return message;
                 }
@@ -210,22 +218,17 @@ public sealed class ReadableHttpExecutor : IReadableHttpExecutor
         }
     }
 
-    private HttpClient CreateHttpClient(ReadableExecutionContext context)
+    private ClientLease CreateHttpClient(ReadableExecutionContext context)
     {
+        if (_client is not null)
+        {
+            return new ClientLease(_client, false);
+        }
         if (_httpClientFactory is not null)
         {
             var client = _httpClientFactory();
-            if (context.BaseAddress is not null)
-            {
-                client.BaseAddress = context.BaseAddress;
-            }
-
-            if (context.HasTimeoutOverride)
-            {
-                client.Timeout = context.Timeout;
-            }
-
-            return client;
+            if (context.HasTimeoutOverride) client.Timeout = context.Timeout;
+            return new ClientLease(client, true);
         }
 
         var handler = _handler ?? CreateHandler(context);
@@ -239,7 +242,7 @@ public sealed class ReadableHttpExecutor : IReadableHttpExecutor
             httpClient.Timeout = context.Timeout;
         }
 
-        return httpClient;
+        return new ClientLease(httpClient, true);
     }
 
     private static CancellationTokenSource? CreateTimeoutCancellationTokenSource(
@@ -287,23 +290,51 @@ public sealed class ReadableHttpExecutor : IReadableHttpExecutor
         HttpClient httpClient,
         ReadableRequest request,
         ReadableExecutionContext context,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool capturePreview = true)
     {
         var redirects = new List<ReadableRedirect>();
-        var currentUrl = ReadableHttpRequestMessageFactory.BuildUrl(request);
+        var currentUrl = request.Url;
         var currentMethod = request.Method;
         var includeBody = true;
+        var stripCredentials = false;
         string? rawRequestPreview = null;
 
         for (var redirectCount = 0; redirectCount < 10; redirectCount++)
         {
-            var hopRequest = CloneForHop(request, currentUrl, currentMethod, includeBody);
+            var hopRequest = redirectCount == 0 ? request : CloneForHop(request, currentUrl, currentMethod, includeBody);
+            if (stripCredentials)
+            {
+                if (httpClient.DefaultRequestHeaders.Any(header =>
+                    header.Key.Equals("Authorization", StringComparison.OrdinalIgnoreCase) ||
+                    header.Key.Equals("Proxy-Authorization", StringComparison.OrdinalIgnoreCase) ||
+                    header.Key.Equals("Cookie", StringComparison.OrdinalIgnoreCase)))
+                {
+                    throw new InvalidOperationException("Cannot follow a cross-origin redirect with credentials in HttpClient.DefaultRequestHeaders. Set authentication on the request instead.");
+                }
+                hopRequest.Auth = new ReadableAuth { Type = ReadableAuthType.None };
+                var auth = request.Auth is null or { Type: ReadableAuthType.Inherit } ? context.Auth : request.Auth;
+                hopRequest.Headers.RemoveAll(header =>
+                    header.Name.Equals("Authorization", StringComparison.OrdinalIgnoreCase) ||
+                    header.Name.Equals("Proxy-Authorization", StringComparison.OrdinalIgnoreCase) ||
+                    header.Name.Equals("Cookie", StringComparison.OrdinalIgnoreCase) ||
+                    header.Name.Equals("Host", StringComparison.OrdinalIgnoreCase) ||
+                    (auth?.Type == ReadableAuthType.ApiKey && header.Name.Equals(auth.Name, StringComparison.OrdinalIgnoreCase)) ||
+                    (auth?.Type == ReadableAuthType.OAuth2 && header.Name.Equals(auth.OAuth2?.TokenName, StringComparison.OrdinalIgnoreCase)));
+            }
             using var httpRequest = ReadableHttpRequestMessageFactory.Create(hopRequest, context);
-            rawRequestPreview ??= await CreateRawRequestPreviewAsync(httpRequest, cancellationToken);
+            if (httpRequest.RequestUri is { IsAbsoluteUri: false } && httpClient.BaseAddress is not null)
+            {
+                httpRequest.RequestUri = new Uri(httpClient.BaseAddress, httpRequest.RequestUri);
+            }
+            if (capturePreview)
+            {
+                rawRequestPreview ??= await CreateRawRequestPreviewAsync(httpRequest, cancellationToken);
+            }
 
             var response = await httpClient.SendAsync(
                 httpRequest,
-                HttpCompletionOption.ResponseContentRead,
+                HttpCompletionOption.ResponseHeadersRead,
                 cancellationToken);
 
             if (!context.FollowRedirects || !IsRedirect(response.StatusCode) || response.Headers.Location is null)
@@ -311,14 +342,28 @@ public sealed class ReadableHttpExecutor : IReadableHttpExecutor
                 return new ReadableSendResult(response, redirects, rawRequestPreview ?? string.Empty);
             }
 
-            var nextUrl = ResolveRedirectUrl(currentUrl, response.Headers.Location);
+            string nextUrl;
+            try
+            {
+                var currentUri = httpRequest.RequestUri!;
+                nextUrl = ResolveRedirectUrl(currentUri.AbsoluteUri, response.Headers.Location);
+                var nextUri = new Uri(nextUrl);
+                stripCredentials |= !string.Equals(currentUri.Scheme, nextUri.Scheme, StringComparison.OrdinalIgnoreCase)
+                    || !string.Equals(currentUri.Authority, nextUri.Authority, StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                response.Dispose();
+                throw;
+            }
             redirects.Add(new ReadableRedirect
             {
                 StatusCode = (int)response.StatusCode,
                 Location = nextUrl
             });
 
-            if (response.StatusCode is HttpStatusCode.Moved or HttpStatusCode.Found or HttpStatusCode.SeeOther)
+            if ((response.StatusCode is HttpStatusCode.Moved or HttpStatusCode.Found && currentMethod.Equals("POST", StringComparison.OrdinalIgnoreCase))
+                || (response.StatusCode == HttpStatusCode.SeeOther && !currentMethod.Equals("HEAD", StringComparison.OrdinalIgnoreCase)))
             {
                 currentMethod = "GET";
                 includeBody = false;
@@ -555,23 +600,18 @@ public sealed class ReadableHttpExecutor : IReadableHttpExecutor
         int bufferSize,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        var buffer = new byte[Math.Max(bufferSize, 1024)];
-        while (true)
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, leaveOpen: true);
+        var buffer = new char[bufferSize];
+        int read;
+        while ((read = await reader.ReadAsync(buffer, cancellationToken)) > 0)
         {
-            var read = await stream.ReadAsync(buffer, cancellationToken);
-            if (read == 0)
-            {
-                yield break;
-            }
-
             yield return new ReadableStreamMessage
             {
                 Type = ReadableStreamMessageType.Data,
-                Data = Encoding.UTF8.GetString(buffer, 0, read)
+                Data = new string(buffer, 0, read)
             };
         }
     }
-
     private static async IAsyncEnumerable<ReadableStreamMessage> ReadLinesAsync(
         Stream stream,
         [EnumeratorCancellation] CancellationToken cancellationToken)
@@ -595,219 +635,39 @@ public sealed class ReadableHttpExecutor : IReadableHttpExecutor
 
     private static async IAsyncEnumerable<ReadableStreamMessage> ReadJsonArrayAsync(
         Stream stream,
+        bool allowRawFallback,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, leaveOpen: true);
-        var buffer = new char[1024];
-        var element = new StringBuilder();
-        var arrayStarted = false;
-        var readingElement = false;
-        var inString = false;
-        var escaped = false;
-        var nestedDepth = 0;
-        var completed = false;
-
-        while (!completed)
+        using var prefix = new MemoryStream();
+        var probe = new byte[1];
+        var read = 0;
+        if (allowRawFallback)
         {
-            var read = await reader.ReadAsync(buffer, cancellationToken);
-            if (read == 0)
+            do
             {
-                break;
-            }
-
-            for (var index = 0; index < read; index++)
-            {
-                var current = buffer[index];
-                if (!arrayStarted)
-                {
-                    if (char.IsWhiteSpace(current))
-                    {
-                        continue;
-                    }
-
-                    if (current == '[')
-                    {
-                        arrayStarted = true;
-                        continue;
-                    }
-
-                    await foreach (var message in ReadRawFromPrefixAsync(
-                        new string(buffer, index, read - index),
-                        reader,
-                        cancellationToken))
-                    {
-                        yield return message;
-                    }
-
-                    yield break;
-                }
-
-                if (!readingElement)
-                {
-                    if (char.IsWhiteSpace(current) || current == ',')
-                    {
-                        continue;
-                    }
-
-                    if (current == ']')
-                    {
-                        completed = true;
-                        break;
-                    }
-
-                    readingElement = true;
-                    inString = current == '"';
-                    escaped = false;
-                    nestedDepth = current is '{' or '[' ? 1 : 0;
-                    element.Clear();
-                    element.Append(current);
-                    continue;
-                }
-
-                if (inString)
-                {
-                    element.Append(current);
-                    if (escaped)
-                    {
-                        escaped = false;
-                    }
-                    else if (current == '\\')
-                    {
-                        escaped = true;
-                    }
-                    else if (current == '"')
-                    {
-                        inString = false;
-                    }
-
-                    continue;
-                }
-
-                if (current == '"')
-                {
-                    inString = true;
-                    element.Append(current);
-                    continue;
-                }
-
-                if (current is '{' or '[')
-                {
-                    nestedDepth++;
-                    element.Append(current);
-                    continue;
-                }
-
-                if (current is '}' or ']')
-                {
-                    if (nestedDepth > 0)
-                    {
-                        nestedDepth--;
-                        element.Append(current);
-                        continue;
-                    }
-
-                    foreach (var message in CompleteJsonArrayElement(element))
-                    {
-                        yield return message;
-                    }
-
-                    readingElement = false;
-                    completed = current == ']';
-                    if (completed)
-                    {
-                        break;
-                    }
-
-                    continue;
-                }
-
-                if (current == ',' && nestedDepth == 0)
-                {
-                    foreach (var message in CompleteJsonArrayElement(element))
-                    {
-                        yield return message;
-                    }
-
-                    readingElement = false;
-                    continue;
-                }
-
-                element.Append(current);
-            }
+                read = await stream.ReadAsync(probe, cancellationToken);
+                if (read != 0) prefix.WriteByte(probe[0]);
+            } while (read != 0 && prefix.Length < 4096 && probe[0] is 9 or 10 or 13 or 32);
         }
 
-        if (readingElement && element.Length > 0)
+        using var replay = new PrefixReadStream(prefix.ToArray(), stream);
+        if (allowRawFallback && (read == 0 || probe[0] != '['))
         {
-            foreach (var message in CompleteJsonArrayElement(element))
-            {
-                yield return message;
-            }
-        }
-    }
-
-    private static IEnumerable<ReadableStreamMessage> CompleteJsonArrayElement(StringBuilder element)
-    {
-        var raw = element.ToString().Trim();
-        element.Clear();
-        if (raw.Length == 0)
-        {
+            await foreach (var message in ReadRawStreamAsync(replay, 8192, cancellationToken)) yield return message;
             yield break;
         }
 
-        yield return new ReadableStreamMessage
+        await foreach (var element in JsonSerializer.DeserializeAsyncEnumerable<JsonElement>(replay, cancellationToken: cancellationToken))
         {
-            Type = ReadableStreamMessageType.Data,
-            Data = DecodeJsonArrayElement(raw),
-            Raw = raw
-        };
-    }
-
-    private static string DecodeJsonArrayElement(string raw)
-    {
-        if (raw == "null")
-        {
-            return "null";
-        }
-
-        if (raw.StartsWith('"'))
-        {
-            return JsonSerializer.Deserialize<string>(raw) ?? string.Empty;
-        }
-
-        return raw;
-    }
-
-    private static async IAsyncEnumerable<ReadableStreamMessage> ReadRawFromPrefixAsync(
-        string prefix,
-        StreamReader reader,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
-    {
-        if (!string.IsNullOrEmpty(prefix))
-        {
+            var raw = element.GetRawText();
             yield return new ReadableStreamMessage
             {
                 Type = ReadableStreamMessageType.Data,
-                Data = prefix
-            };
-        }
-
-        var buffer = new char[1024];
-        while (true)
-        {
-            var read = await reader.ReadAsync(buffer, cancellationToken);
-            if (read == 0)
-            {
-                yield break;
-            }
-
-            yield return new ReadableStreamMessage
-            {
-                Type = ReadableStreamMessageType.Data,
-                Data = new string(buffer, 0, read)
+                Data = element.ValueKind == JsonValueKind.String ? element.GetString() : raw,
+                Raw = raw
             };
         }
     }
-
     private static async IAsyncEnumerable<ReadableStreamMessage> ReadServerSentEventsAsync(
         Stream stream,
         [EnumeratorCancellation] CancellationToken cancellationToken)
@@ -1046,4 +906,12 @@ public sealed class ReadableHttpExecutor : IReadableHttpExecutor
         HttpResponseMessage Response,
         List<ReadableRedirect> Redirects,
         string RawRequestPreview);
+
+    private sealed record ClientLease(HttpClient Client, bool OwnsClient) : IDisposable
+    {
+        public void Dispose()
+        {
+            if (OwnsClient) Client.Dispose();
+        }
+    }
 }

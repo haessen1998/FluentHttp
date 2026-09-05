@@ -17,12 +17,17 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: |
-            8.0.x
-            10.0.x
+          dotnet-version: 10.0.x
 
       - name: Restore
-        run: dotnet restore FluentHttp.sln
+        run: dotnet restore ReadableHttp.sln
 
       - name: Build
-        run: dotnet build FluentHttp.sln --configuration Release --no-restore
+        run: dotnet build ReadableHttp.sln --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test tests/ReadableHttp.Tests/ReadableHttp.Tests.csproj --configuration Release --no-build
+
+      - name: Pack
+        shell: pwsh
+        run: ./scripts/pack.ps1

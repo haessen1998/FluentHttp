@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <Description>JSON storage helpers for ReadableHttp workspaces, requests, responses, and exchanges.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+    <ProjectReference Include="..\..\src\ReadableHttp\ReadableHttp.csproj" />
+    <ProjectReference Include="..\ReadableHttp.ImportExport\ReadableHttp.ImportExport.csproj" />
+  </ItemGroup>
+</Project>

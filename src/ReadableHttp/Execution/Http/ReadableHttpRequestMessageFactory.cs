@@ -12,10 +12,14 @@ internal static class ReadableHttpRequestMessageFactory
     public static HttpRequestMessage Create(ReadableRequest request, ReadableExecutionContext context)
     {
         var query = request.Query.Where(item => item.Enabled).ToList();
-        var auth = request.Auth ?? context.Auth;
+        var auth = request.Auth is null or { Type: ReadableAuthType.Inherit } ? context.Auth : request.Auth;
         ApplyAuth(auth, request, query);
 
         var url = BuildUrl(request, query);
+        if (context.BaseAddress is not null)
+        {
+            url = new Uri(context.BaseAddress, url).AbsoluteUri;
+        }
         var message = new HttpRequestMessage(new HttpMethod(request.Method), url)
         {
             Content = CreateContent(request.Body)
@@ -55,8 +59,8 @@ internal static class ReadableHttpRequestMessageFactory
         var url = request.Url;
         foreach (var parameter in request.PathParameters.Where(parameter => parameter.Enabled))
         {
-            url = url.Replace("{" + parameter.Name + "}", Uri.EscapeDataString(parameter.Value ?? string.Empty), StringComparison.OrdinalIgnoreCase)
-                .Replace("{{" + parameter.Name + "}}", Uri.EscapeDataString(parameter.Value ?? string.Empty), StringComparison.OrdinalIgnoreCase);
+            url = url.Replace("{{" + parameter.Name + "}}", Uri.EscapeDataString(parameter.Value ?? string.Empty), StringComparison.OrdinalIgnoreCase)
+                .Replace("{" + parameter.Name + "}", Uri.EscapeDataString(parameter.Value ?? string.Empty), StringComparison.OrdinalIgnoreCase);
         }
 
         var enabledQuery = query
@@ -69,11 +73,14 @@ internal static class ReadableHttpRequestMessageFactory
             return url;
         }
 
+        var fragmentIndex = url.IndexOf('#');
+        var fragment = fragmentIndex >= 0 ? url[fragmentIndex..] : string.Empty;
+        url = fragmentIndex >= 0 ? url[..fragmentIndex] : url;
         var separator = url.Contains('?', StringComparison.Ordinal)
             ? url.EndsWith('?') || url.EndsWith('&') ? string.Empty : "&"
             : "?";
 
-        return $"{url}{separator}{string.Join("&", enabledQuery)}";
+        return $"{url}{separator}{string.Join("&", enabledQuery)}{fragment}";
     }
 
     private static HttpContent? CreateContent(ReadableBody? body)

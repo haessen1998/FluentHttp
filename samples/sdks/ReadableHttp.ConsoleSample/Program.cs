@@ -1,48 +1,34 @@
 using ReadableHttp;
+using ReadableHttp.Execution;
 
-//var exchange = await ReadableHttpClient
-//    .Request("https://httpbin.org/get")
-//    .Get()
-//    .WithHeader("accept", "application/json")
-//    .WithQuery("source", "console-sample")
-//    .SendExchangeAsync();
+using var handler = new SocketsHttpHandler
+{
+    AllowAutoRedirect = false,
+    UseCookies = false,
+    PooledConnectionLifetime = TimeSpan.FromMinutes(5)
+};
+using var client = new HttpClient(handler)
+{
+    BaseAddress = new Uri(args.FirstOrDefault() ?? "https://httpbin.org/"),
+    Timeout = TimeSpan.FromSeconds(30)
+};
+var executor = new ReadableHttpExecutor(client);
+using var cancellation = new CancellationTokenSource();
+Console.CancelKeyPress += (_, eventArgs) =>
+{
+    eventArgs.Cancel = true;
+    cancellation.Cancel();
+};
 
-//Console.WriteLine($"Status: {exchange.Response?.StatusCode}");
-//Console.WriteLine(exchange.Response?.BodyText);
+var response = await executor.Request("get")
+    .Get().WithQuery("source", "console-sample")
+    .SendAsync(cancellation.Token);
+Console.WriteLine($"Status: {response.StatusCode}");
+Console.WriteLine(response.BodyText);
 
-Console.WriteLine();
-Console.WriteLine("JsonArray shape:");
-
-await foreach (var message in ReadableHttpClient
-    .Request("https://intelligentapi.hzfanews.com/Ai/AnswerStrings")
-    .WithQuery("modelEnum", 12)
-    .Post()
-    .WithJsonBody(new
-    {
-        Question = "介绍一下杭州"
-    })
-    .StreamAsync(ReadableStreamFormat.Auto))
+await foreach (var message in executor.Request("stream/3")
+    .StreamAsync(ReadableStreamFormat.Lines, cancellation.Token))
 {
     if (message.Type == ReadableStreamMessageType.Data)
-    {
-        Console.Write(message.Data);
-    }
-}
-
-
-Console.WriteLine();
-Console.WriteLine("Streaming shape:");
-await foreach (var message in ReadableHttpClient
-    .Request("https://intelligentapi.hzfanews.com/Ai/AnswerStream?modelEnum=12")
-    .Post()
-    .WithJsonBody(new
-    {
-        Question = "介绍一下杭州"
-    })
-    .StreamAsync(ReadableStreamFormat.Auto))
-{
-    if (message.Type == ReadableStreamMessageType.Data)
-    {
-        Console.Write(message.Data);
-    }
+        Console.WriteLine(message.Data);
 }

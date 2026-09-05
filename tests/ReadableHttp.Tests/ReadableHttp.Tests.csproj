@@ -17,7 +17,7 @@
     <ProjectReference Include="..\..\extensions\ReadableHttp.Auth\ReadableHttp.Auth.csproj" />
     <ProjectReference Include="..\..\src\ReadableHttp.AspNetCore\ReadableHttp.AspNetCore.csproj" />
     <ProjectReference Include="..\..\extensions\ReadableHttp.ImportExport\ReadableHttp.ImportExport.csproj" />
-    <ProjectReference Include="..\..\apps\supports\ReadableHttp.Storage\ReadableHttp.Storage.csproj" />
-    <ProjectReference Include="..\..\apps\supports\ReadableHttp.Try\ReadableHttp.Try.csproj" />
+    <ProjectReference Include="..\..\extensions\ReadableHttp.Storage\ReadableHttp.Storage.csproj" />
+    <ProjectReference Include="..\..\extensions\ReadableHttp.Try\ReadableHttp.Try.csproj" />
   </ItemGroup>
 </Project>

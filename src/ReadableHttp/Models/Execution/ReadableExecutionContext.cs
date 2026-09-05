@@ -13,6 +13,10 @@ public sealed class ReadableExecutionContext
         get => _timeout ?? TimeSpan.FromSeconds(60);
         set
         {
+            if (value != System.Threading.Timeout.InfiniteTimeSpan && (value <= TimeSpan.Zero || value.TotalMilliseconds > int.MaxValue))
+            {
+                throw new ArgumentOutOfRangeException(nameof(value), "Timeout must be positive or infinite and fit the timer range.");
+            }
             _timeout = value;
             HasTimeoutOverride = true;
         }
@@ -34,4 +38,6 @@ public sealed class ReadableExecutionContext
     public bool IgnoreSslErrors { get; set; }
 
     public List<ReadableCookie> Cookies { get; set; } = [];
+
+    internal ReadableExecutionContext Snapshot() => (ReadableExecutionContext)MemberwiseClone();
 }
